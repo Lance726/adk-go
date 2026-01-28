@@ -22,6 +22,8 @@ import (
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
@@ -35,6 +37,16 @@ type AfterEventCallback func(ctx ExecutorContext, event *session.Event, processe
 
 // AfterExecuteCallback is the callback which will be called after an execution resolved into a completed or failed task.
 type AfterExecuteCallback func(ctx ExecutorContext, finalEvent *a2a.TaskStatusUpdateEvent, err error) error
+
+// A2APartConverter is a custom converter for converting A2A parts to GenAI parts.
+// Implementations should generally remember to leverage adka2a.ToGenAiPart for default conversions
+// nil returns are considered intentionally dropped parts.
+type A2APartConverter func(ctx context.Context, a2aEvent a2a.Event, part a2a.Part) (*genai.Part, error)
+
+// GenAIPartConverter is a custom converter for converting GenAI parts to A2A parts.
+// Implementations should generally remember to leverage adka2a.ToA2APart for default conversions
+// nil returns are considered intentionally dropped parts.
+type GenAIPartConverter func(ctx context.Context, adkEvent *session.Event, part *genai.Part) (a2a.Part, error)
 
 // ExecutorConfig allows to configure Executor.
 type ExecutorConfig struct {
@@ -57,6 +69,16 @@ type ExecutorConfig struct {
 	// AfterExecuteCallback is the callback which will be called after an execution resolved into a completed or failed task.
 	// This gives an opportunity to enrich the event with additional metadata or log it.
 	AfterExecuteCallback AfterExecuteCallback
+
+	// A2APartConverter is a custom converter for converting A2A parts to GenAI parts.
+	// Implementations should generally remember to leverage [adka2a.ToGenAiPart] for default conversions
+	// nil returns are considered intentionally dropped parts.
+	A2APartConverter A2APartConverter
+
+	// GenAIPartConverter is a custom converter for converting GenAI parts to A2A parts.
+	// Implementations should generally remember to leverage [adka2a.ToA2APart] for default conversions
+	// nil returns are considered intentionally dropped parts.
+	GenAIPartConverter GenAIPartConverter
 }
 
 var _ a2asrv.AgentExecutor = (*Executor)(nil)
@@ -84,7 +106,7 @@ func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q
 	if msg == nil {
 		return fmt.Errorf("message not provided")
 	}
-	content, err := toGenAIContent(msg)
+	content, err := toGenAIContent(ctx, msg, e.config.A2APartConverter)
 	if err != nil {
 		return fmt.Errorf("a2a message conversion failed: %w", err)
 	}
@@ -128,7 +150,7 @@ func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q
 		return err
 	}
 
-	processor := newEventProcessor(reqCtx, invocationMeta)
+	processor := newEventProcessor(reqCtx, invocationMeta, e.config.GenAIPartConverter)
 	executorContext := newExecutorContext(ctx, invocationMeta, session.State(), content)
 	return e.process(executorContext, r, processor, queue)
 }
