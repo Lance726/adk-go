@@ -243,11 +243,17 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResp
 	}
 
 	// Besides the session specific artifacts, also retrieve user scoped artifacts.
+	// Only filenames with the "user:" prefix are user-scoped; other entries in the
+	// userScopedArtifactKey slot belong to a session that happens to be named "user"
+	// and must not leak across sessions.
 	userScopeLo := artifactKey{AppName: appName, UserID: userID, SessionID: userScopedArtifactKey}.Encode()
 	userScopeHi := artifactKey{AppName: appName, UserID: userID, SessionID: userScopedArtifactKey + "\x00"}.Encode()
 	// TODO: extend omap to search key only and skip value decoding.
 	for key := range s.scan(userScopeLo, userScopeHi) {
 		if key.SessionID != userScopedArtifactKey { // scan includes key matching `userScopeHi`
+			continue
+		}
+		if !fileHasUserNamespace(key.FileName) {
 			continue
 		}
 		files[key.FileName] = true

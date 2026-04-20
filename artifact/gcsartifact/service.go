@@ -229,7 +229,10 @@ func (s *gcsService) Load(ctx context.Context, req *artifact.LoadRequest) (_ *ar
 }
 
 // fetchFilenamesFromPrefix is a reusable helper function.
-func (s *gcsService) fetchFilenamesFromPrefix(ctx context.Context, prefix string, filenamesSet map[string]bool) error {
+// If userScopedOnly is true, only filenames with the "user:" prefix are collected —
+// this prevents session-scoped artifacts saved under a session literally named "user"
+// from leaking through the user-scope scan.
+func (s *gcsService) fetchFilenamesFromPrefix(ctx context.Context, prefix string, filenamesSet map[string]bool, userScopedOnly bool) error {
 	// Add a guard clause to prevent a panic if a nil map is passed.
 	if filenamesSet == nil {
 		return fmt.Errorf("filenamesSet cannot be nil")
@@ -260,6 +263,9 @@ func (s *gcsService) fetchFilenamesFromPrefix(ctx context.Context, prefix string
 		// Extract filename from path: appName/userId/sessionId/filename/version or appName/userId/user/filename/version
 		// Note: filenames with path separators are rejected during validation (see service.go Validate methods)
 		filename := segments[len(segments)-2]
+		if userScopedOnly && !fileHasUserNamespace(filename) {
+			continue
+		}
 		filenamesSet[filename] = true
 	}
 
@@ -276,13 +282,14 @@ func (s *gcsService) List(ctx context.Context, req *artifact.ListRequest) (*arti
 	filenamesSet := map[string]bool{}
 
 	// Fetch filenames for the session.
-	err = s.fetchFilenamesFromPrefix(ctx, buildSessionPrefix(appName, userID, sessionID), filenamesSet)
+	err = s.fetchFilenamesFromPrefix(ctx, buildSessionPrefix(appName, userID, sessionID), filenamesSet, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch session filenames: %w", err)
 	}
 
-	// Fetch filenames for the user.
-	err = s.fetchFilenamesFromPrefix(ctx, buildUserPrefix(appName, userID), filenamesSet)
+	// Fetch filenames for the user. Restrict to "user:"-prefixed names so that a
+	// session named "user" cannot leak its session-scoped artifacts to other sessions.
+	err = s.fetchFilenamesFromPrefix(ctx, buildUserPrefix(appName, userID), filenamesSet, true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch user filenames: %w", err)
 	}

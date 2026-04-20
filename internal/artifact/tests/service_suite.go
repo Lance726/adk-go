@@ -56,6 +56,14 @@ func TestArtifactService(t *testing.T, name string, factory func(t *testing.T) (
 		}
 		testArtifactService_UserScoped(ctx, t, srv, name)
 	})
+	t.Run(fmt.Sprintf("Test%sArtifactService_UserScopeIsolation", name), func(t *testing.T) {
+		ctx := t.Context()
+		srv, err := factory(t)
+		if err != nil {
+			t.Fatalf("Failed to set up service: %v", err)
+		}
+		testArtifactService_UserScopeIsolation(ctx, t, srv, name)
+	})
 }
 
 func testArtifactService(ctx context.Context, t *testing.T, srv artifact.Service, testSuffix string) {
@@ -372,6 +380,85 @@ func testArtifactService_UserScoped(ctx context.Context, t *testing.T, srv artif
 		AppName: appName, UserID: userID, SessionID: sessionID, FileName: "user:file3",
 	}); err != nil {
 		t.Fatalf("Delete(user:file3) failed: %v", err)
+	}
+}
+
+// testArtifactService_UserScopeIsolation verifies that an artifact saved in a
+// session literally named "user" (which collides with the internal user-scope
+// slot) is NOT exposed to other sessions of the same user through List.
+//
+// Regression test for an isolation bug where the user-scope scan in List would
+// return every filename under SessionID="user" — including session-scoped files
+// that don't carry the "user:" prefix — leaking them across sessions.
+func testArtifactService_UserScopeIsolation(ctx context.Context, t *testing.T, srv artifact.Service, testSuffix string) {
+	appName := "testapp"
+	userID := "testuser"
+
+	// Save a session-scoped file under a session literally named "user".
+	// The filename has no "user:" prefix, so it must remain session-private.
+	leakyPart := genai.NewPartFromBytes([]byte("session-private content"), "text/plain")
+	if _, err := srv.Save(ctx, &artifact.SaveRequest{
+		AppName: appName, UserID: userID, SessionID: "user", FileName: "session_private.txt",
+		Part: leakyPart,
+	}); err != nil {
+		t.Fatalf("Save(sessionID=user, session_private.txt) failed: %v", err)
+	}
+
+	// Save a genuine user-scoped artifact (the "user:" prefix routes it to
+	// the user-scope slot regardless of the caller's sessionID).
+	sharedPart := genai.NewPartFromBytes([]byte("user-shared content"), "text/plain")
+	if _, err := srv.Save(ctx, &artifact.SaveRequest{
+		AppName: appName, UserID: userID, SessionID: "any_session", FileName: "user:shared.txt",
+		Part: sharedPart,
+	}); err != nil {
+		t.Fatalf("Save(user:shared.txt) failed: %v", err)
+	}
+
+	t.Run(fmt.Sprintf("ListFromOtherSession_%s", testSuffix), func(t *testing.T) {
+		// A different session must only see the genuine user-scoped artifact,
+		// not the session-private file that happened to live in the "user" slot.
+		resp, err := srv.List(ctx, &artifact.ListRequest{
+			AppName: appName, UserID: userID, SessionID: "other_session",
+		})
+		if err != nil {
+			t.Fatalf("List(other_session) failed: %v", err)
+		}
+		got := resp.FileNames
+		slices.Sort(got)
+		want := []string{"user:shared.txt"}
+		if diff := cmp.Diff(got, want); diff != "" {
+			t.Errorf("List(other_session) leaked session-private artifact: diff (-got +want):\n%s", diff)
+		}
+	})
+
+	t.Run(fmt.Sprintf("ListFromUserNamedSession_%s", testSuffix), func(t *testing.T) {
+		// The session literally named "user" should still see its own
+		// session-private file, plus the user-scoped artifact (which shares
+		// the same storage slot by design).
+		resp, err := srv.List(ctx, &artifact.ListRequest{
+			AppName: appName, UserID: userID, SessionID: "user",
+		})
+		if err != nil {
+			t.Fatalf("List(user) failed: %v", err)
+		}
+		got := resp.FileNames
+		slices.Sort(got)
+		want := []string{"session_private.txt", "user:shared.txt"}
+		if diff := cmp.Diff(got, want); diff != "" {
+			t.Errorf("List(sessionID=user) = %v, want %v; diff:\n%s", got, want, diff)
+		}
+	})
+
+	// Clean up.
+	if err := srv.Delete(ctx, &artifact.DeleteRequest{
+		AppName: appName, UserID: userID, SessionID: "user", FileName: "session_private.txt",
+	}); err != nil {
+		t.Fatalf("Delete(session_private.txt) failed: %v", err)
+	}
+	if err := srv.Delete(ctx, &artifact.DeleteRequest{
+		AppName: appName, UserID: userID, SessionID: "any_session", FileName: "user:shared.txt",
+	}); err != nil {
+		t.Fatalf("Delete(user:shared.txt) failed: %v", err)
 	}
 }
 
